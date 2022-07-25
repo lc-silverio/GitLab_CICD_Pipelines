@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+
+<body>
+    <div class="text-center">
+        <h1 class="display-4">Welcome</h1>
+        <br>
+        <button onclick="Get()">Get Data</button>
+        <select id="target3" onchange="val()" style="width: 300px;">
+            <option></option>
+        </select>
+
+        <div id="div1">
+            <table id="table">
+                <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Created At</th>
+                    <th>Web URL</th>
+                </tr>
+            </table>
+        </div>
+
+        <div id="div2" style="display:none">
+            <table id="table2">
+                <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Branch</th>
+                    <th>Pipeline Id</th>
+                    <th>Trigger</th>
+                </tr>
+            </table>
+        </div>
+    </div>
+
+    <script type="text/javascript" src="script.js"></script>
+    <script src="https://smtpjs.com/v3/smtp.js">
+  </script>
+</body>
+
+<style>
+    table {
+        border-collapse: separate;
+        border-spacing: 50px 0;
+    }
+
+    td {
+        padding: 10px 0;
+    }
+</style>
+
+</html>

@@ -1,0 +1,502 @@
+#CI Pipeline
+
+variables:
+  # Project Configuration --------------------------------------------------------------------------------------------------------
+  PROJECT_NAME: "GitLab"
+  PROJECT_ID: "0"
+  PROJECT_VERSION: "1.0.0" # The version that will be deployed
+  GITLAB_PROJECT_ID: 0
+  PROJECT_KEY: "" #Personnal Token - Here we can use a bot's personnal token and only during approval request the users token via the UI application
+
+  # Runner Path Configuration --------------------------------------------------------------------------------------------------------
+  NUGET_PATH: 'C:\Tools\Nuget\nuget.exe' # Nuget.exe folder location - Required to restore packages
+  MSBUILD_PATH: 'C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\MSBuild\Current\Bin\msbuild.exe' # MS Build location - Required to build project
+  NUNIT_PATH: packages\NUnit.ConsoleRunner.3.15.0\tools # Path to the nUnit/xUnit console runner
+
+  # Application Configuration
+  PROJECT: 'src\CiCdExample\CiCdExample.csproj' # Compiled project file
+  COMPILED_PROJECT_PATH: '.\src\CiCdExample\bin\Release\Publish' # Compiled project folder location
+  UNITTEST_FOLDER: '.\tests\CiCdExample.Tests\bin\Release' # Units test folder
+  TESTS_PROJECT: "CiCdExample.Tests.dll" # Unit tests DLL
+  BETA_PUBLISH_PROFILE: "FolderProfile.pubxml" # Beta Publish Profile
+  PRODUCTION_PUBLISH_PROFILE: "FolderProfile.pubxml" # Production Publish Profile
+  DEPLOY_FOLDER: 'C:\inetpub\;Passwordroot\ci-cd-example\' # Where the app will be deployed
+
+  # Branch Configuration --------------------------------------------------------------------------------------------------------
+  BETA_BRANCH: "beta" # Name of the beta branch
+  PRODUCTION_BRANCH: "master" # Name of the production branch
+
+  # E-mail Configuration --------------------------------------------------------------------------------------------------------
+  SENDER: "" # The no-reply address e-mail used to send notifications
+  MAILING_LIST: "" # The list of users that should recieve a notification from gitlab
+  SMTP_SERVER: ""
+  PORT: 25
+
+  # Backup/Restore Configuration-------------------------------------------------------------------------------------------------
+  # Production
+  PROD_SERVER: "SERVER"
+  PROD_DB: "GITLAB"
+  PROD_FOLDER_BACKUP: '\\Machine\folder' # Where the backup will be saved
+  # Beta
+  BETA_SERVER: "SERVER"
+  BETA_DB: "GitLab"
+  BETA_FOLDER_BACKUP: '\\Machine\folder\' # Where the backup will be saved
+# -----------------------------------------------------------------------------------------------------------------------------
+
+# Pipeline stages
+stages:
+  - build
+  - test-unit
+  - test-integration
+  - notification-approval
+  - notification-approved
+  - maintenance
+  - backup-folder
+  - backup-database
+  - deploy-sql
+  - deploy-app
+  - deploy-sonarqube
+  - notification-finished
+  - revert
+
+#----------------------------------------------DEV--------------------------------------------------
+# Builds the project
+dev-build:
+  stage: build
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH != $CI_COMMIT_BRANCH && $PRODUCTION_BRANCH != $CI_COMMIT_BRANCH && $BETA_BRANCH != $CI_MERGE_REQUEST_TARGET_BRANCH_NAME && $PRODUCTION_BRANCH != $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+  script:
+    # Restores nugets
+    - '& "$env:NUGET_PATH" restore'
+    # Sets the application to release mode
+    - '& "$env:MSBUILD_PATH" /p:Configuration=Release /clp:Errorstags'
+    # Builds the application using the beta publish profile
+    - '& "$env:MSBUILD_PATH" "$env:PROJECT" /p:DeployOnBuild=true /p:Configuration=Release /P:PublishProfile="$env:BETA_PUBLISH_PROFILE"'
+  artifacts:
+    expire_in: 2 days
+    paths:
+      - "$env:COMPILED_PROJECT_PATH"
+      - "$env:UNITTEST_FOLDER"
+      - '.\$env:NUNIT_PATH\*.*'
+
+# nUnit Console Runner executes the unit tests
+dev-unit-test:
+  stage: test-unit
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH != $CI_COMMIT_BRANCH && $PRODUCTION_BRANCH != $CI_COMMIT_BRANCH
+  script:
+    # Restores nuget packages
+    - '& "$env:NUGET_PATH" restore'
+    # Runs the unit tests in the built application
+    - '& "$env:NUNIT_PATH\nunit3-console.exe" "$env:UNITTEST_FOLDER\$env:TESTS_PROJECT"'
+  dependencies:
+    - dev-build
+
+# nUnit Console Runner executes the integration tests
+dev-integration-test:
+  stage: test-integration
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH != $CI_COMMIT_BRANCH && $PRODUCTION_BRANCH != $CI_COMMIT_BRANCH
+  script: echo "Integration Tests"
+  dependencies:
+    - dev-unit-test
+
+# Send to Sonarqube
+deploy-sonarqube:
+  stage: deploy-sonarqube
+  tags:
+    - Development
+  rules:
+    - if: ($BETA_BRANCH != $CI_COMMIT_BRANCH) && ($PRODUCTION_BRANCH != $CI_COMMIT_BRANCH)
+  script:
+    - $env:CI_PROJECT_ID = ${CI_PROJECT_ID}
+    - $env:CI_COMMIT_SHA = ${CI_COMMIT_SHA}
+    - $env:CI_COMMIT_REF_NAME = ${CI_COMMIT_REF_NAME}
+    - .\build.ps1 --Target=Sonar
+  dependencies:
+    - dev-build
+    - dev-unit-test
+    - dev-integration-test
+
+# Sends a notification to the user informing that the pipeline has finished
+notification-finished:
+  stage: notification-finished
+  tags:
+    - Development
+  rules:
+    - if: ($BETA_BRANCH != $CI_COMMIT_BRANCH) && ($PRODUCTION_BRANCH != $CI_COMMIT_BRANCH)
+  script:
+    - Send-MailMessage -To $MAILING_LIST -Cc $PROJECT_MONITOR -From $SENDER -Subject "$PROJECT_NAME sent to Sonarqube" -Body "Hello,`n The GitLab validation requested by $GITLAB_USER_NAME for project $PROJECT_NAME has finished validating your application and has passed it to sonarqube for code review. `n Version - $PROJECT_VERSION; `n Environment - DEVELOPMENT  `n`n Best regards, `n GitLab Automated Validation Platform" -SmtpServer $SMTP_Server -Port $PORT
+  dependencies:
+    - deploy-sonarqube
+
+#----------------------------------------------BETA--------------------------------------------------
+# Builds the project
+beta-build:
+  stage: build
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Restores nuget packages
+    - '& "$env:NUGET_PATH" restore'
+    # Sets the application to release mode
+    - '& "$env:MSBUILD_PATH" /p:Configuration=Release /clp:Errorstags'
+    # Builds the application using the publish profile
+    - '& "$env:MSBUILD_PATH" "$env:PROJECT" /p:DeployOnBuild=true /p:Configuration=Release /P:PublishProfile="$env:BETA_PUBLISH_PROFILE"'
+  artifacts:
+    expire_in: 2 days
+    paths:
+      - "$env:COMPILED_PROJECT_PATH"
+      - "$env:UNITTEST_FOLDER"
+      - '.\$env:NUNIT_PATH\*.*'
+
+# nUnit Console Runner executes the unit tests
+beta-unit-test:
+  stage: test-unit
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Restores nuget packages
+    - '& "$env:NUGET_PATH" restore'
+    # Runs the unit tests in the built application
+    - '& "$env:NUNIT_PATH\nunit3-console.exe" "$env:UNITTEST_FOLDER\$env:TESTS_PROJECT"'
+  dependencies:
+    - beta-build
+
+# nUnit Console Runner executes the unit tests
+beta-integration-test:
+  stage: test-integration
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script: echo "TODO Add Integration Tests"
+  dependencies:
+    - beta-unit-test
+
+# Sends a notification to the user informing that the pipeline requires manual approval to deploy
+beta-notification-approval:
+  stage: notification-approval
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Sends e-mail notification to inform the user that the deploy is ready for approval
+    - Send-MailMessage -To $MAILING_LIST -Cc $PROJECT_MONITOR -From $SENDER -Subject "Ready to deploy $PROJECT_NAME!" -Body "GitLab has finished validating the request created by $GITLAB_USER_NAME for project $PROJECT_NAME and marked it as ready to deploy to BETA. `n <a href="http://localhost/Test/Home/GetJobs?id=$GITLAB_PROJECT_ID&token=$PROJECT_KEY">When possible please approve the deployment of the application (Version - $PROJECT_VERSION)</a>. `n`n URL -   `n`n Best regards, `n GitLab Automated Validation Platform" -SmtpServer $SMTP_Server -Port $PORT
+  dependencies:
+    - beta-integration-test
+
+# Sends a notification to the user informing that the pipeline requires manual approval to deploy
+beta-notification-approved:
+  stage: notification-approved
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+      when: manual
+  script:
+    # Sends e-mail notification to inform the user that the deployment has been approved
+    - Send-MailMessage -To $MAILING_LIST -Cc $PROJECT_MONITOR -From $SENDER -Subject "Deployment of $PROJECT_NAME has been approved!" -Body "The deployment of project $PROJECT_NAME has been authorized by $GITLAB_USER_NAME `n Version - $PROJECT_VERSION; `n Environment - BETA  `n`n Best regards, `n GitLab Automated Validation Platform" -SmtpServer $SMTP_Server -Port $PORT
+  dependencies:
+    - beta-notification-approval
+
+# Sets the appication as "In Maintenance prior to application deployment"
+beta-maintenance:
+  stage: maintenance
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Sets the application as "Maintenance mode"
+    echo "Maintenance Mode"
+  dependencies:
+    - beta-notification-approved
+
+# Creates a backup file of the target application folder
+beta-backup-application:
+  stage: backup-folder
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    - |-
+      if (Test-Path -Path $env:BETA_FOLDER_BACKUP\beta.zip){
+        Compress-Archive -Path $env:DEPLOY_FOLDER -Update -DestinationPath $env:BETA_FOLDER_BACKUP\beta.zip
+      }
+      else{
+        Compress-Archive -Path $env:DEPLOY_FOLDER -DestinationPath $env:BETA_FOLDER_BACKUP\beta.zip
+      }
+  dependencies:
+    - beta-maintenance
+
+# Creates a backup file of the target database
+beta-backup-database:
+  stage: backup-database
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    - |-
+      if (Test-Path -Path $env:BETA_FOLDER_BACKUP\beta.bak){
+        Remove-Item $env:BETA_FOLDER_BACKUP\beta.bak
+        Backup-SqlDatabase -ServerInstance $env:BETA_SERVER -Database $env:BETA_DB -BackupFile $env:BETA_FOLDER_BACKUP\beta.bak
+      }
+      else{
+        Backup-SqlDatabase -ServerInstance $env:BETA_SERVER -Database $env:BETA_DB -BackupFile $env:BETA_FOLDER_BACKUP\beta.bak
+      }
+  dependencies:
+    - beta-backup-application
+
+# Deploys the SQL script
+beta-deploy-sql:
+  stage: deploy-sql
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    - yuniql run  -p ".\_Versions" -c "Data Source=SERVER;Initial Catalog=database;Persist Security Info=True;User ID=USER;Password=;Password;Trusted_Connection=True;TrustServerCertificate=True" -a  --platform "sqlserver"
+    - yuniql list  -c "Data Source=SERVER;Initial Catalog=database;Persist Security Info=True;User ID=USER;Password=;Password;Trusted_Connection=True;TrustServerCertificate=True"  --platform "sqlserver"
+  dependencies:
+    - beta-backup-database
+
+# Deploys the application
+beta-deploy-app:
+  stage: deploy-app
+  tags:
+    - Development
+  rules: # Job will only run after manual order
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Copies the built app from the publish folder to the server deployment folder
+    - '& xcopy /y /s "$env:COMPILED_PROJECT_PATH\*.*" "$env:DEPLOY_FOLDER"'
+  dependencies:
+    - beta-build
+    - beta-unit-test
+    - beta-deploy-sql
+
+# Sends a notification to the user informing that the pipeline requires manual approval to deploy
+beta-notification-finished:
+  stage: notification-finished
+  tags:
+    - Development
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Sends e-mail notification to inform the user that the deployment has been approved
+    - Send-MailMessage -To $MAILING_LIST -Cc $PROJECT_MONITOR -From $SENDER -Subject "Deployment of $PROJECT_NAME concluded!" -Body "The GitLab deployment requested by $GITLAB_USER_NAME for project $PROJECT_NAME has been concluded and the application is now available for use. `n Version - $PROJECT_VERSION; `n Environment - BETA.  `n`n Best regards, `n GitLab Automated Validation Platform" -SmtpServer $SMTP_Server -Port $PORT
+  dependencies:
+    - beta-deploy-app
+
+# Triggered by a failing job. Checks if backups exist a reverts
+beta_revert:
+  stage: revert
+  rules:
+    - if: $BETA_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $BETA_BRANCH == $CI_COMMIT_BRANCH
+      when: on_failure
+  script:
+    - |-
+      if (Test-Path -Path $env:BETA_FOLDER_BACKUP\beta.bak){
+        Restore-SqlDatabase -ServerInstance "$env:BETA_SERVER" -Database "$env:BETA_DB" -BackupFile "$env:BETA_FOLDER_BACKUP\beta.bak"
+      }
+      if (Test-Path -Path $env:BETA_FOLDER_BACKUP\beta.zip){
+        Expand-Archive -LiteralPath '$env:BETA_FOLDER_BACKUP\beta.zip' -DestinationPath $env:DEPLOY_FOLDER
+      }
+    - Send-MailMessage -To $MAILING_LIST -Cc $PROJECT_MONITOR -From $SENDER -Subject "$PROJECT_NAME deployment failed" -Body "Hello. An error as occured when deploying $PROJECT_NAME. Pending changes were reverted. `n`n Best regards, `n GitLab Automated Validation Platform" -SmtpServer $SMTP_Server -Port $PORT
+
+#----------------------------------------------PROD--------------------------------------------------
+# Builds the project
+prod-build:
+  stage: build
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Restores nuget packages
+    - '& "$env:NUGET_PATH" restore'
+    # Sets the application to release mode
+    - '& "$env:MSBUILD_PATH" /p:Configuration=Release /clp:Errorstags'
+    # Builds the application using the publish profile
+    - '& "$env:MSBUILD_PATH" "$env:PROJECT" /p:DeployOnBuild=true /p:Configuration=Release /P:PublishProfile="$env:PRODUCTION_PUBLISH_PROFILE"'
+  artifacts:
+    expire_in: 2 days
+    paths:
+      - "$env:COMPILED_PROJECT_PATH"
+      - "$env:UNITTEST_FOLDER"
+      - '.\$env:NUNIT_PATH\*.*'
+
+# nUnit Console Runner executes the unit tests
+prod-unit-test:
+  stage: test-unit
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Restores nuget packages
+    - '& "$env:NUGET_PATH" restore'
+    # Runs the unit tests in the built application
+    - '& "$env:NUNIT_PATH\nunit3-console.exe" "$env:UNITTEST_FOLDER\$env:TESTS_PROJECT"'
+  dependencies:
+    - prod-build
+
+# nUnit Console Runner executes the unit tests
+prod-integration-test:
+  stage: test-integration
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script: echo "TODO Add Integration Tests"
+
+  dependencies:
+    - prod-unit-test
+
+# Sends a notification to the user informing that the pipeline requires manual approval to deploy
+prod-notification-approval:
+  stage: notification-approval
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Sends e-mail notification to inform the user that the deploy is ready for approval
+    - Send-MailMessage -To $MAILING_LIST -Cc $PROJECT_MONITOR -From $SENDER -Subject "Ready to deploy $PROJECT_NAME!" -Body "GitLab has finished validating the request created by $GITLAB_USER_NAME for project $PROJECT_NAME and marked it as ready to deploy to PRODUCTION. `n <a href="http://localhost/Test/Home/GetJobs?id=$GITLAB_PROJECT_ID&token=$PROJECT_KEY">When possible please approve the deployment of the application (Version - $PROJECT_VERSION)</a>. `n`n URL -   `n`n Best regards, `n GitLab Automated Validation Platform" -SmtpServer $SMTP_Server -Port $PORT
+  dependencies:
+    - prod-integration-test
+
+# Sends a notification to the user informing that the pipeline requires manual approval to deploy
+prod-notification-approved:
+  stage: notification-approved
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+      when: manual
+  script:
+    # Sends e-mail notification to inform the user that the deployment has been approved
+    - Send-MailMessage -To $MAILING_LIST -Cc $PROJECT_MONITOR -From $SENDER -Subject "Deployment of $PROJECT_NAME has been approved!" -Body "The deployment of project $PROJECT_NAME has been authorized by $GITLAB_USER_NAME `n Version - $PROJECT_VERSION; `n Environment - BETA  `n`n Best regards, `n GitLab Automated Validation Platform" -SmtpServer $SMTP_Server -Port $PORT
+  dependencies:
+    - prod-notification-approval
+
+# Sets the appication as "In Maintenance prior to application deployment"
+prod-maintenance:
+  stage: maintenance
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Sets the application as "Maintenance mode"
+    echo "Maintenance Mode"
+  dependencies:
+    - prod-notification-approved
+
+# Creates a backup file of the target application folder
+prod-backup-application:
+  stage: backup-folder
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    - |-
+      if (Test-Path -Path $env:PROD_FOLDER_BACKUP\prod.zip){
+        Compress-Archive -Path $env:DEPLOY_FOLDER -Update -DestinationPath $env:PROD_FOLDER_BACKUP\prod.zip
+      }
+      else{
+        Compress-Archive -Path $env:DEPLOY_FOLDER -DestinationPath $env:PROD_FOLDER_BACKUP\prod.zip
+      }
+  dependencies:
+    - prod-maintenance
+
+# Creates a backup file of the target database
+prod-backup-database:
+  stage: backup-database
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    - |-
+      if (Test-Path -Path $env:PROD_FOLDER_BACKUP\prod.bak){
+        Remove-Item $env:PROD_FOLDER_BACKUP\prod.bak
+        Backup-SqlDatabase -ServerInstance $env:PROD_SERVER -Database $env:PROD_DB -BackupFile $env:PROD_FOLDER_BACKUP\prod.bak
+      }
+      else{
+        Backup-SqlDatabase -ServerInstance $env:PROD_SERVER -Database $env:PROD_DB -BackupFile $env:PROD_FOLDER_BACKUP\prod.bak
+      }
+  dependencies:
+    - prod-backup-application
+
+# Deploys the SQL script
+prod-deploy-sql:
+  stage: deploy-sql
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    - yuniql run  -p ".\_Versions" -c "Data Source=SERVER;Initial Catalog=database;Persist Security Info=True;User ID=USER;Password=;Password;Trusted_Connection=True;TrustServerCertificate=True" -a  --platform "sqlserver"
+    - yuniql list  -c "Data Source=SERVER;Initial Catalog=database;Persist Security Info=True;User ID=USER;Password=;Password;Trusted_Connection=True;TrustServerCertificate=True"  --platform "sqlserver"
+  dependencies:
+    - prod-backup-database
+
+# Deploys the application
+prod-deploy-app:
+  stage: deploy-app
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Copies the built app from the publish folder to the server deployment folder
+    - '& xcopy /y /s "$env:COMPILED_PROJECT_PATH\*.*" "$env:DEPLOY_FOLDER"'
+  dependencies:
+    - prod-build
+    - prod-unit-test
+    - prod-deploy-sql
+
+# Sends a notification to the user informing that the pipeline requires manual approval to deploy
+prod-notification-finished:
+  stage: notification-finished
+  tags:
+    - Development
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+  script:
+    # Sends e-mail notification to inform the user that the deployment has been approved
+    - Send-MailMessage -To $MAILING_LIST -Cc $PROJECT_MONITOR -From $SENDER -Subject "Deployment of $PROJECT_NAME concluded!" -Body "The GitLab deployment requested by $GITLAB_USER_NAME for project $PROJECT_NAME has been concluded and the application is now available for use. `n Version - $PROJECT_VERSION; `n Environment - PRODUCTION.  `n`n Best regards, `n GitLab Automated Validation Platform" -SmtpServer $SMTP_Server -Port $PORT
+  dependencies:
+    - prod-deploy-app
+
+# Triggered by a failing job. Checks if backups exist a reverts
+prod-revert:
+  stage: revert
+  rules:
+    - if: $PRODUCTION_BRANCH == $CI_MERGE_REQUEST_TARGET_BRANCH_NAME || $PRODUCTION_BRANCH == $CI_COMMIT_BRANCH
+      when: on_failure
+  script:
+    - |-
+      if (Test-Path -Path $env:PROD_FOLDER_BACKUP\prod.bak){
+        Restore-SqlDatabase -ServerInstance "$env:PROD_SERVER" -Database "$env:PROD_DB" -BackupFile "$env:PROD_FOLDER_BACKUP\prod.bak"
+      }
+      if (Test-Path -Path $env:PROD_FOLDER_BACKUP\prod.zip){
+        Expand-Archive -LiteralPath "$env:PROD_FOLDER_BACKUP\prod.zip" -DestinationPath $env:DEPLOY_FOLDER
+      }
+    - Send-MailMessage -To $MAILING_LIST -Cc $PROJECT_MONITOR -From $SENDER -Subject "$PROJECT_NAME deployment failed" -Body "Hello. An error as occured when deploying $PROJECT_NAME. Pending changes were reverted. `n`n Best regards, `n GitLab Automated Validation Platform" -SmtpServer $SMTP_Server -Port $PORT
